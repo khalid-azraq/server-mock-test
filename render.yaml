@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: esekan-mock-server # أو اسم فريد آخر تختاره
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python server.py" # <--- تأكد من أن هذا هو اسم ملف الخادم الخاص بك
+    healthCheckPath: / # إذا أضفت نقطة نهاية / للتحقق من الصحة
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.9 # أو 3.10, 3.11 حسب تفضيلك ودعم Render
