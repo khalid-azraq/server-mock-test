@@ -1,142 +1,195 @@
 from flask import Flask, request, jsonify
 import datetime
-import os # لاستخدام متغيرات البيئة للمنفذ
+import os
+import hashlib # تأكد من وجود هذا
+import uuid     # <--- أضف هذا الاستيراد الضروري!
+
 
 app = Flask(__name__)
 
-# بيانات محاكاة (ستُعاد تهيئتها مع كل إعادة تشغيل للخادم على Render في الطبقة المجانية)
-registered_devices = {}
-next_client_id_counter = 1001
+registered_devices = {} # سيعاد تعيينه مع كل إعادة تشغيل في الطبقة المجانية
+next_server_client_id_counter = 1001 # لإنشاء client_id فريد من الخادم
+
+# =============================================================================
+#  >>> أضف هذه الدالة هنا <<<
+# =============================================================================
+def calculate_server_hash(device_serial, utc_timestamp_salt, machine_guid):
+    """
+    Server-side function to recalculate the hash.
+    MUST match the client's logic and salt (timestamp) format.
+    Format: device_serial{utc_timestamp_salt}machine_guid
+    """
+    if not all([device_serial, utc_timestamp_salt, machine_guid]):
+        print("SERVER_HASH_CALC_ERROR: Missing components for server-side hash calculation.")
+        return None # أو ارمي استثناء
+    
+    string_to_hash = f"{device_serial}{utc_timestamp_salt}{machine_guid}"
+    encoded_string = string_to_hash.encode('utf-8')
+    sha256_hasher = hashlib.sha256()
+    sha256_hasher.update(encoded_string)
+    return sha256_hasher.hexdigest()
+# =============================================================================
+#  >>> نهاية الدالة المضافة <<<
+# =============================================================================
+
 
 @app.route('/api/v1/device/register', methods=['POST'])
-def register_device():
-    global next_client_id_counter
-    print("\n--- Received /register request (new fingerprint logic) ---")
+def comprehensive_register_device():
+    # لم نعد بحاجة إلى global next_server_client_id_counter إذا استخدمنا UUID
+    
+    current_time_utc = datetime.datetime.now(datetime.timezone.utc) # استخدم هذا بدلاً من utcnow() المتكرر
+    print(f"\n[{current_time_utc.isoformat()}] --- Received COMPREHENSIVE /register request ---")
+    
     try:
         data = request.get_json()
-        if not data: return jsonify({"error": "JSON body expected."}), 400
-        print(f"Request JSON: {data}")
+        if not data:
+            print("REGISTER_ERROR: Request body is not JSON or is empty.")
+            return jsonify({"error": "Invalid request. JSON body expected."}), 400
+        
+        # اطبع جزءًا فقط إذا كان الـ payload كبيرًا جدًا لتجنب إغراق السجلات
+        data_str_for_log = str(data)
+        print(f"REGISTER_REQUEST_JSON (first 500 chars): {data_str_for_log[:500]}{'...' if len(data_str_for_log) > 500 else ''}")
 
         # استخراج البيانات من الكلاينت
-        client_sent_serial = data.get('device_serial_number')
-        client_sent_guid = data.get('machine_guid')
-        client_sent_timestamp_salt = data.get('timestamp_salt')
-        client_sent_hash = data.get('fingerprint_hash')
-        device_name = data.get('device_name', 'Unknown Device')
+        client_sent_hash = data.get('fingerprint_hash_calculated')
+        client_sent_salt = data.get('timestamp_salt_used') # هذا هو التوقيت الذي استخدمه الكلاينت كملح
+        
+        full_report = data.get('full_system_report', {})
+        # استخراج السيريال والـ GUID من التقرير الشامل
+        device_serial_from_report = full_report.get("Hardware", {}).get("Motherboard", {}).get("SerialNumber", "N/A_SERIAL_RPT").strip()
+        machine_guid_from_report = full_report.get("SystemIdentity", {}).get("MachineGUID_Registry", "N/A_GUID_RPT").strip()
+        
+        device_name_from_payload = data.get('device_name_provided', 
+                                     full_report.get("SystemIdentity", {}).get("Hostname", "UnknownDevice"))
 
-        if not all([client_sent_serial, client_sent_guid, client_sent_timestamp_salt, client_sent_hash]):
-            return jsonify({"error": "Missing required fields: device_serial_number, machine_guid, timestamp_salt, fingerprint_hash"}), 400
+        # التحقق من وجود جميع المكونات الضرورية للتحقق من الهاش
+        critical_components = {
+            "fingerprint_hash_calculated": client_sent_hash,
+            "timestamp_salt_used": client_sent_salt,
+            "device_serial_from_report": device_serial_from_report,
+            "machine_guid_from_report": machine_guid_from_report
+        }
+        missing_fields = [k for k, v in critical_components.items() if not v or v.startswith("N/A_")]
 
-        # (اختياري) التحقق من صحة التوقيت (timestamp_salt) هنا إذا أردت
+        if missing_fields:
+            error_message = f"Missing critical components for hash verification or from report. Missing or invalid: {', '.join(missing_fields)}"
+            print(f"REGISTER_ERROR: {error_message}")
+            return jsonify({"error": error_message}), 400
 
-        # الخادم يعيد حساب الهاش باستخدام البيانات المستلمة (لأن هذه هي بيانات "الهوية" الآن)
-        # والملح (التوقيت) المستلم.
-        hash_calculated_by_server = calculate_server_hash( # استخدم دالة حساب الهاش على الخادم
-            client_sent_serial,
-            client_sent_timestamp_salt,
-            client_sent_guid
+        # 1. التحقق من صحة الهاش (إعادة حسابه على الخادم)
+        hash_recalculated_by_server = calculate_server_hash(
+            device_serial_from_report,
+            client_sent_salt, # استخدم الملح (التوقيت) الذي أرسله الكلاينت
+            machine_guid_from_report
         )
 
-        if hash_calculated_by_server is None:
+        if hash_recalculated_by_server is None: # فشل في الحساب بسبب مدخلات فارغة للدالة
+            print("REGISTER_ERROR: Server-side hash calculation failed (likely missing components for calculate_server_hash).")
             return jsonify({"error": "Server error during hash calculation."}), 500
+        
+        print(f"Server-calculated hash: {hash_recalculated_by_server}")
+        print(f"Client-provided hash:   {client_sent_hash}")
 
-        print(f"Server calculated hash: {hash_calculated_by_server}")
-        print(f"Client provided hash:   {client_sent_hash}")
+        # استخدام المقارنة المباشرة للسلاسل النصية (أبسط، ولخطر timing attack منخفض هنا)
+        if hash_recalculated_by_server != client_sent_hash:
+            print(f"HASH_MISMATCH: ServerCalc={hash_recalculated_by_server}, ClientSent={client_sent_hash}")
+            return jsonify({"error": "Fingerprint hash verification failed. Hash mismatch.", "status": "hash_mismatch"}), 401
+        
+        print("Fingerprint hash VERIFIED successfully.")
 
-        if hashlib.compare_digest(hash_calculated_by_server, client_sent_hash):
-            # الهاش متطابق! هذا يعني أن الكلاينت أرسل بصمة صحيحة
-            # بناءً على السيريال والـ GUID والتوقيت الذي أرسلهم.
+        # 2. (اختياري) شغل "الخوارزمية المعينة" على full_report الآن بعد التحقق من الهاش
+        # algorithm_passed = True # افترض أنها ناجحة مبدئيًا
+        # if not algorithm_passes(full_report): # دالة افتراضية
+        #     print("ALGORITHM_REJECT: Device does not meet registration criteria based on full report.")
+        #     return jsonify({"error": "Device does not meet registration criteria."}), 403
+        # print("Custom algorithm/policy check PASSED (or skipped).")
 
-            # الآن منطق التسجيل/التحديث:
-            # ابحث عن جهاز بناءً على مزيج فريد (مثلاً، client_sent_serial + client_sent_guid)
-            # هذا يعتمد على كيف تريد تعريف "الجهاز الفريد"
-            unique_device_identifier_on_server = f"{client_sent_serial}_{client_sent_guid}" # مثال
 
-            server_client_id_to_return = None
-            found_device = False
-            for s_id, dev_info in registered_devices.items():
-                if dev_info.get('unique_hw_id') == unique_device_identifier_on_server:
-                    server_client_id_to_return = s_id
-                    dev_info['last_verified_utc'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                    dev_info['device_name'] = device_name # تحديث الاسم
-                    found_device = True
-                    message = "Device re-authenticated successfully."
-                    print(f"Device '{unique_device_identifier_on_server}' re-authenticated. Server ClientID: {s_id}")
-                    break
+        # 3. إذا نجح كل شيء، قم بالتسجيل وتوليد الترخيص
+        # استخدم مزيجًا من السيريال والـ GUID كمعرف فريد للجهاز في قاعدة بيانات الخادم
+        unique_hw_identifier_for_server_db = f"{device_serial_from_report}_{machine_guid_from_report}"
+        
+        final_client_id_to_return = None
+        generated_license_key = None
+        device_already_existed = False
+
+        # ابحث إذا كان هذا الجهاز (بناءً على unique_hw_identifier_for_server_db) مسجلًا بالفعل
+        for s_id, dev_info in registered_devices.items():
+            if dev_info.get('unique_hw_id') == unique_hw_identifier_for_server_db:
+                final_client_id_to_return = s_id # أعد استخدام الـ client_id (الـ UUID) القديم
+                generated_license_key = dev_info.get('license_key') # أعد استخدام مفتاح الترخيص القديم
+                # يمكنك تحديث بعض المعلومات إذا أردت
+                dev_info['last_full_registration_utc'] = current_time_utc.isoformat()
+                dev_info['device_name'] = device_name_from_payload
+                device_already_existed = True
+                message = "Device re-validated and license confirmed."
+                print(f"REGISTER_REVALIDATED: Device '{unique_hw_identifier_for_server_db}'. ClientID: {final_client_id_to_return}")
+                break
+        
+        if not device_already_existed:
+            final_client_id_to_return = str(uuid.uuid4()) # توليد UUID جديد كـ client_id
+            generated_license_key = f"ESK_LIC_{final_client_id_to_return[:8].upper()}_{os.urandom(6).hex().upper()}"
             
-            if not found_device:
-                server_client_id_to_return = f"RNDR_AUTH_CLNT_{next_client_id_counter}"
-                next_client_id_counter += 1
-                registered_devices[server_client_id_to_return] = {
-                    'unique_hw_id': unique_device_identifier_on_server,
-                    'device_name': device_name,
-                    'device_serial_stored': client_sent_serial, # حفظ المعلومات للتحققات المستقبلية
-                    'machine_guid_stored': client_sent_guid,   # إذا لم تكن هي نفسها unique_hw_id
-                    'first_registered_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    'last_verified_utc': datetime.datetime.now(datetime.timezone.utc).isoformat()
+            registered_devices[final_client_id_to_return] = {
+                'unique_hw_id': unique_hw_identifier_for_server_db,
+                'device_name': device_name_from_payload,
+                'license_key': generated_license_key,
+                'stored_serial_for_ref': device_serial_from_report, # للتأكيد فقط، ليس للاستخدام في الهاش لاحقًا
+                'stored_guid_for_ref': machine_guid_from_report,   # للتأكيد فقط
+                'registration_utc': current_time_utc.isoformat(),
+                'last_full_registration_utc': current_time_utc.isoformat(),
+                # يمكنك تخزين ملخص من full_report إذا أردت
+                'report_summary': { 
+                   "os": full_report.get("OperatingSystem",{}).get("System"),
+                   "cpu": full_report.get("Hardware",{}).get("CPU",{}).get("Name")
                 }
-                message = "Device authenticated and registered successfully!"
-                print(f"New device '{unique_device_identifier_on_server}' authenticated. Assigned Server ClientID: {server_client_id_to_return}")
-
-            response_data = {
-                "message": message,
-                "client_id": server_client_id_to_return,
-                "status": "success"
             }
-            return jsonify(response_data), 200
-        else:
-            print("Error: Fingerprint hash mismatch between client and server calculation.")
-            return jsonify({"error": "Fingerprint verification failed. Hash mismatch.", "status": "unauthorized"}), 401
+            message = "Device registered and license generated successfully!"
+            print(f"REGISTER_NEW_SUCCESS: Device '{unique_hw_identifier_for_server_db}'. ClientID: {final_client_id_to_return}")
+        
+        response_payload = {
+            "status": "success",
+            "message": message,
+            "client_id": final_client_id_to_return,
+            "license_key": generated_license_key
+        }
+        print(f"REGISTER_RESPONSE_PAYLOAD: {response_payload}")
+        return jsonify(response_payload), 200
 
     except Exception as e:
-        print(f"Error processing /register request: {e}")
+        print(f"REGISTER_EXCEPTION (Comprehensive): {e}")
         import traceback
-        print(traceback.format_exc())
-        return jsonify({"error": "An internal server error occurred", "details": str(e)}), 500
+        print(traceback.format_exc()) # مهم جدًا لرؤية الخطأ الكامل في سجلات Render/المحلية
+        return jsonify({"error": "Internal server error during comprehensive registration", "details": str(e)}), 500
 
+# ... (بقية نقاط النهاية /heartbeat و / كما هي، مع تحديث استخدام datetime.datetime.now(datetime.timezone.utc))
 
 @app.route('/api/v1/device/heartbeat', methods=['POST'])
 def heartbeat():
-    print("\n--- Received /heartbeat request ---")
-    try:
-        client_id_from_header = request.headers.get('X-Device-ID')
-        print(f"X-Device-ID Header: {client_id_from_header}")
+    current_time_utc = datetime.datetime.now(datetime.timezone.utc)
+    print(f"\n[{current_time_utc.isoformat()}] --- Received /heartbeat request ---")
+    # ... (الكود المتبقي كما هو، ولكن استخدم current_time_utc بدلاً من datetime.datetime.utcnow()) ...
+    client_id_from_header = request.headers.get('X-Device-ID')
+    if not client_id_from_header: # ... (return error) ...
+        return jsonify({"error": "X-Device-ID header is required"}), 400
 
-        # جسم الطلب (payload) من الكلاينت يفترض أن يكون JSON فارغ {} أو بيانات أخرى
-        # request_payload = request.get_json() # إذا كنت تتوقع جسمًا
-        # print(f"Request JSON Payload: {request_payload}")
+    if client_id_from_header in registered_devices:
+        registered_devices[client_id_from_header]['last_heartbeat_utc'] = current_time_utc.isoformat()
+        message = "Heartbeat acknowledged."
+        print(f"HEARTBEAT_SUCCESS: For ClientID: {client_id_from_header}")
+        return jsonify({"message": message, "status": "success", "data": {"server_time": current_time_utc.isoformat()}}), 200
+    else:
+        message = "Device not recognized (ClientID unknown)."
+        print(f"HEARTBEAT_REJECTED: Unknown ClientID: {client_id_from_header}")
+        return jsonify({"error": message, "status": "unauthorized"}), 401
 
-        if not client_id_from_header:
-            print("Error: 'X-Device-ID' header is missing.")
-            return jsonify({"error": "X-Device-ID header is required"}), 400
 
-        if client_id_from_header in registered_devices:
-            registered_devices[client_id_from_header]['last_seen'] = datetime.datetime.utcnow().isoformat() + "Z"
-            message = "Heartbeat acknowledged by Render mock server."
-            print(f"Heartbeat received for ClientID: {client_id_from_header}")
-            response_data = {
-                "message": message,
-                "status": "success",
-                "data": {"timestamp": datetime.datetime.utcnow().isoformat() + "Z"} # مثال على بيانات إضافية
-            }
-            return jsonify(response_data), 200
-        else:
-            message = "Device not recognized by Render mock server."
-            print(f"Heartbeat rejected for unknown ClientID: {client_id_from_header}")
-            return jsonify({"error": message, "status": "unauthorized"}), 401
-
-    except Exception as e:
-        print(f"Error processing /heartbeat request: {e}")
-        return jsonify({"error": "An internal server error occurred", "details": str(e)}), 500
-
-# نقطة نهاية بسيطة للتحقق من أن الخادم يعمل
 @app.route('/', methods=['GET'])
 def health_check():
-    return jsonify({"status": "Render Mock Server is UP!", "time": datetime.datetime.utcnow().isoformat() + "Z"}), 200
+    return jsonify({"status": "Esekan Mock Server (Comprehensive Register) is UP!", 
+                    "time_utc": datetime.datetime.now(datetime.timezone.utc).isoformat()}), 200
 
 if __name__ == '__main__':
-    # Render ستقوم بتعيين متغير البيئة PORT
-    # محليًا، إذا لم يتم تعيينه، سيستخدم 5500
     port = int(os.environ.get('PORT', 5500))
-    # مهم: يجب أن يستمع على 0.0.0.0 ليقبل الاتصالات الخارجية على Render
-    app.run(host='0.0.0.0', port=port, debug=False) # debug=False للإنتاج على Render
+    print(f"Starting server on host 0.0.0.0, port {port}...")
+    app.run(host='0.0.0.0', port=port, debug=True) # debug=True جيد للاختبار المحلي
