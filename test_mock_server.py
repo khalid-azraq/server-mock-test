@@ -10,59 +10,90 @@ next_client_id_counter = 1001
 
 @app.route('/api/v1/device/register', methods=['POST'])
 def register_device():
-    global next_client_id_counter # ضروري لتعديل المتغير العام
-    print("\n--- Received /register request ---") # للـ logging على Render
+    global next_client_id_counter
+    print("\n--- Received /register request (new fingerprint logic) ---")
     try:
         data = request.get_json()
-        if not data: # إذا لم يتم إرسال JSON
-            print("Error: Request body is not JSON or is empty.")
-            return jsonify({"error": "Invalid request. JSON body expected."}), 400
+        if not data: return jsonify({"error": "JSON body expected."}), 400
         print(f"Request JSON: {data}")
 
-
-        device_id_from_client = data.get('device_id')
+        # استخراج البيانات من الكلاينت
+        client_sent_serial = data.get('device_serial_number')
+        client_sent_guid = data.get('machine_guid')
+        client_sent_timestamp_salt = data.get('timestamp_salt')
+        client_sent_hash = data.get('fingerprint_hash')
         device_name = data.get('device_name', 'Unknown Device')
 
-        if not device_id_from_client:
-            print("Error: 'device_id' is missing in request.")
-            return jsonify({"error": "Device ID is required"}), 400
+        if not all([client_sent_serial, client_sent_guid, client_sent_timestamp_salt, client_sent_hash]):
+            return jsonify({"error": "Missing required fields: device_serial_number, machine_guid, timestamp_salt, fingerprint_hash"}), 400
 
-        existing_client_id = None
-        for client_id, dev_info in registered_devices.items():
-            if dev_info['original_device_id'] == device_id_from_client:
-                existing_client_id = client_id
-                break
+        # (اختياري) التحقق من صحة التوقيت (timestamp_salt) هنا إذا أردت
 
-        if existing_client_id:
-            registered_devices[existing_client_id]['last_seen'] = datetime.datetime.utcnow().isoformat() + "Z"
-            registered_devices[existing_client_id]['device_name'] = device_name
-            client_id_to_return = existing_client_id
-            message = "Device already known. Information possibly updated."
-            print(f"Device '{device_id_from_client}' already known with ClientID: {client_id_to_return}.")
-        else:
-            client_id_to_return = f"RNDR_CLNT_{next_client_id_counter}" # RNDR لـ Render
-            next_client_id_counter += 1
-            registered_devices[client_id_to_return] = {
-                'original_device_id': device_id_from_client,
-                'device_name': device_name,
-                'registered_at': datetime.datetime.utcnow().isoformat() + "Z",
-                'last_seen': datetime.datetime.utcnow().isoformat() + "Z"
+        # الخادم يعيد حساب الهاش باستخدام البيانات المستلمة (لأن هذه هي بيانات "الهوية" الآن)
+        # والملح (التوقيت) المستلم.
+        hash_calculated_by_server = calculate_server_hash( # استخدم دالة حساب الهاش على الخادم
+            client_sent_serial,
+            client_sent_timestamp_salt,
+            client_sent_guid
+        )
+
+        if hash_calculated_by_server is None:
+            return jsonify({"error": "Server error during hash calculation."}), 500
+
+        print(f"Server calculated hash: {hash_calculated_by_server}")
+        print(f"Client provided hash:   {client_sent_hash}")
+
+        if hashlib.compare_digest(hash_calculated_by_server, client_sent_hash):
+            # الهاش متطابق! هذا يعني أن الكلاينت أرسل بصمة صحيحة
+            # بناءً على السيريال والـ GUID والتوقيت الذي أرسلهم.
+
+            # الآن منطق التسجيل/التحديث:
+            # ابحث عن جهاز بناءً على مزيج فريد (مثلاً، client_sent_serial + client_sent_guid)
+            # هذا يعتمد على كيف تريد تعريف "الجهاز الفريد"
+            unique_device_identifier_on_server = f"{client_sent_serial}_{client_sent_guid}" # مثال
+
+            server_client_id_to_return = None
+            found_device = False
+            for s_id, dev_info in registered_devices.items():
+                if dev_info.get('unique_hw_id') == unique_device_identifier_on_server:
+                    server_client_id_to_return = s_id
+                    dev_info['last_verified_utc'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    dev_info['device_name'] = device_name # تحديث الاسم
+                    found_device = True
+                    message = "Device re-authenticated successfully."
+                    print(f"Device '{unique_device_identifier_on_server}' re-authenticated. Server ClientID: {s_id}")
+                    break
+            
+            if not found_device:
+                server_client_id_to_return = f"RNDR_AUTH_CLNT_{next_client_id_counter}"
+                next_client_id_counter += 1
+                registered_devices[server_client_id_to_return] = {
+                    'unique_hw_id': unique_device_identifier_on_server,
+                    'device_name': device_name,
+                    'device_serial_stored': client_sent_serial, # حفظ المعلومات للتحققات المستقبلية
+                    'machine_guid_stored': client_sent_guid,   # إذا لم تكن هي نفسها unique_hw_id
+                    'first_registered_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    'last_verified_utc': datetime.datetime.now(datetime.timezone.utc).isoformat()
+                }
+                message = "Device authenticated and registered successfully!"
+                print(f"New device '{unique_device_identifier_on_server}' authenticated. Assigned Server ClientID: {server_client_id_to_return}")
+
+            response_data = {
+                "message": message,
+                "client_id": server_client_id_to_return,
+                "status": "success"
             }
-            message = "Device registered successfully on Render!"
-            print(f"New device '{device_id_from_client}' registered. Assigned ClientID: {client_id_to_return}")
-
-        response_data = {
-            "message": message,
-            "client_id": client_id_to_return,
-            "status": "success",
-            "server_type": "Render Mock"
-        }
-        print(f"Sending response: {response_data}")
-        return jsonify(response_data), 200
+            return jsonify(response_data), 200
+        else:
+            print("Error: Fingerprint hash mismatch between client and server calculation.")
+            return jsonify({"error": "Fingerprint verification failed. Hash mismatch.", "status": "unauthorized"}), 401
 
     except Exception as e:
         print(f"Error processing /register request: {e}")
+        import traceback
+        print(traceback.format_exc())
         return jsonify({"error": "An internal server error occurred", "details": str(e)}), 500
+
 
 @app.route('/api/v1/device/heartbeat', methods=['POST'])
 def heartbeat():
