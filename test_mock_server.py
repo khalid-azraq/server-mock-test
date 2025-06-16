@@ -10,6 +10,40 @@ app = Flask(__name__)
 registered_devices = {} # سيعاد تعيينه مع كل إعادة تشغيل في الطبقة المجانية
 next_server_client_id_counter = 1001 # لإنشاء client_id فريد من الخادم
 
+
+
+
+
+
+
+# --- <<< بداية الكود الجديد لنقطة نهاية معلومات التحديث >>> ---
+UPDATE_DATA = {
+  "latest_version": "0.1.1",  # افترض أن هذا هو أحدث إصدار لديك حاليًا
+  "release_date": "2025-06-20",
+  "download_url": "https://github.com/YOUR_USERNAME/YOUR_REPO/releases/latest/download/EsekanLauncher_0.1.1.zip", # مثال لرابط تحميل
+  "changelog_url": "https://github.com/YOUR_USERNAME/YOUR_REPO/blob/main/CHANGELOG.md#0.1.1", # مثال لرابط سجل التغييرات
+  "notes": "تم إصلاح المشكلة X وإضافة الميزة Y في الإصدار 0.1.1.",
+  "force_update_older_than": "0.0.5" # (اختياري)
+}
+
+@app.route('/api/v1/app/updateinfo', methods=['GET'])
+def get_update_info():
+    print(f"[{datetime.datetime.now(datetime.timezone.utc).isoformat()}] --- Received /updateinfo request ---")
+    # يمكنك هنا إضافة منطق أكثر تعقيدًا إذا أردت،
+    # مثل قراءة هذه البيانات من ملف JSON منفصل على الخادم،
+    # أو حتى التحقق من هيدر معين من العميل (مثل اسم البرنامج) إذا كان الخادم سيخدم عدة تطبيقات.
+    # حاليًا، سنرجع البيانات الثابتة المحددة أعلاه.
+    return jsonify(UPDATE_DATA), 200
+# --- <<< نهاية الكود الجديد لنقطة نهاية معلومات التحديث >>> ---
+
+
+
+
+
+
+
+
+
 # =============================================================================
 #  >>> أضف هذه الدالة هنا <<<
 # =============================================================================
@@ -33,7 +67,11 @@ def calculate_server_hash(device_serial, utc_timestamp_salt, machine_guid):
 # =============================================================================
 
 
+
 SERVER_STATIC_SALT = "esekan"
+
+
+
 
 # =============================================================================
 #  دوال حساب الهاش على الخادم
