@@ -1,0 +1,15 @@
+{
+    "77e78b7b-af09-491e-96e7-a6209e689ba6": {
+        "raw_serial": "NBQJS1100134710BC07600",
+        "raw_guid": "8c14b3d7-5527-4fbc-aae1-802ece226c66",
+        "unique_hw_id": "NBQJS1100134710BC07600_8c14b3d7-5527-4fbc-aae1-802ece226c66",
+        "device_name": "PREDATOR",
+        "license_key": "ESK_LIC_V3_77E78B7B_F24FBB230DD2",
+        "registration_utc": "2025-06-16T15:51:44.615186+00:00",
+        "last_heartbeat_utc": "2025-06-16T19:44:48.718123+00:00",
+        "last_routine_check_utc": "2025-06-16T19:44:48.718123+00:00",
+        "last_full_registration_utc": "2025-06-16T18:54:46.050677+00:00",
+        "last_generic_check_utc": "2025-06-16T17:51:22.496141+00:00",
+        "is_premium_user": false
+    }
+}
