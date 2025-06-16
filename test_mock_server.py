@@ -11,6 +11,11 @@ app = Flask(__name__)
 
 
 
+SERVER_STATIC_SALT = "77e78b7b-af09-491e-96e7-a6209e689ba6"
+
+
+
+
 registered_devices = {} # سيعاد تعيينه مع كل إعادة تشغيل في الطبقة المجانية
 next_server_client_id_counter = 1001 # لإنشاء client_id فريد من الخادم
 
@@ -116,11 +121,6 @@ def calculate_server_hash(device_serial, utc_timestamp_salt, machine_guid):
 
 
 
-SERVER_STATIC_SALT = "77e78b7b-af09-491e-96e7-a6209e689ba6"
-
-
-
-
 # =============================================================================
 #  دوال حساب الهاش على الخادم
 # =============================================================================
@@ -138,6 +138,11 @@ def calculate_hash_step2_on_server(sys_manufacturer, static_salt, sys_product_na
     string_to_hash = f"{sys_manufacturer}{static_salt}{sys_product_name}{hash_from_step1}"
     return hashlib.sha256(string_to_hash.encode('utf-8')).hexdigest()
 # =============================================================================
+
+
+
+
+"""
 
 @app.route('/api/v1/device/register', methods=['POST'])
 def comprehensive_register_device_v3(): # اسم وصفي للدالة
@@ -168,6 +173,7 @@ def comprehensive_register_device_v3(): # اسم وصفي للدالة
         
         device_name_from_payload = data.get('device_name_provided', 
                                      full_report.get("SystemIdentity", {}).get("Hostname", "UnknownDevice"))
+        
 
         # التحقق من وجود جميع المكونات الضرورية
         critical_components = {
@@ -227,6 +233,7 @@ def comprehensive_register_device_v3(): # اسم وصفي للدالة
         final_client_id_to_return = None
         generated_license_key = None
         device_already_existed = False
+        
 
         for s_id, dev_info in registered_devices.items():
             if dev_info.get('unique_hw_id') == unique_hw_identifier_for_server_db:
@@ -252,7 +259,8 @@ def comprehensive_register_device_v3(): # اسم وصفي للدالة
                 'registration_utc': current_time_utc.isoformat(),
                 'last_heartbeat_utc': current_time_utc.isoformat(), # جيد لإضافة هذا
                 'last_routine_check_utc': current_time_utc.isoformat(), # ج
-                'is_premium_user': is_this_device_premium # <--- !!!! تخزين حالة Premium !!!!
+                'is_premium_user': is_this_device_premium, # <--- !!!! تخزين حالة Premium !!!!
+                'system_model': system_product_name_from_report
             }
             message = "Device registered (V3) and license generated successfully!"
         else: # إذا كان الجهاز موجودًا، ربما لا تغير حالته premium إلا إذا كان هناك منطق لذلك
@@ -273,6 +281,185 @@ def comprehensive_register_device_v3(): # اسم وصفي للدالة
     except Exception as e:
         print(f"REGISTER_EXCEPTION_V3: {e}")
         import traceback
+        print(traceback.format_exc())
+        return jsonify({"error": "Internal server error during V3 registration", "details": str(e)}), 500
+
+"""
+
+# افترض أن الاستيرادات التالية موجودة في أعلى ملف test_mock_server.py
+# import datetime
+# import os
+# import hashlib
+# import uuid
+# import json
+# from flask import Flask, request, jsonify
+# registered_devices = {} # أو يتم تحميلها من ملف
+# SERVER_STATIC_SALT = "YourSalt" # يجب أن يكون معرفًا
+# def load_devices(): ...
+# def save_devices(): ...
+# def calculate_hash_step1_on_server(...): ...
+# def calculate_hash_step2_on_server(...): ...
+
+@app.route('/api/v1/device/register', methods=['POST'])
+def comprehensive_register_device_v3(): # اسم وصفي للدالة
+    current_time_utc = datetime.datetime.now(datetime.timezone.utc)
+    print(f"\n[{current_time_utc.isoformat()}] --- Received V3 COMPREHENSIVE /register request ---")
+    
+    try:
+        data = request.get_json()
+        if not data:
+            print("REGISTER_ERROR_V3: Request body is not JSON or is empty.")
+            return jsonify({"error": "Invalid request. JSON body expected."}), 400
+        
+        data_str_for_log = str(data)
+        print(f"REGISTER_REQUEST_JSON_V3 (first 500 chars): {data_str_for_log[:500]}{'...' if len(data_str_for_log) > 500 else ''}")
+
+        # استخراج البيانات من الكلاينت
+        client_serial_raw = data.get('device_serial_raw')
+        client_guid_raw = data.get('machine_guid_raw') # افترض أنك لا تزال ترسله للتوافق مع unique_hw_identifier
+        client_timestamp_salt = data.get('timestamp_salt_used')
+        client_hash_step1 = data.get('calculated_fingerprint_hash_step1')
+        client_hash_step2_verification = data.get('verification_hash_step2')
+        
+        full_report = data.get('full_system_report', {})
+        system_manufacturer_from_report = full_report.get("Hardware", {}).get("SystemManufacturer", "N/A_MANUF_RPT").strip()
+        # هذا هو SystemModel الذي نهتم به
+        actual_system_model_from_report = full_report.get("Hardware", {}).get("SystemModel", "N/A_PROD_RPT").strip() 
+        
+        device_name_from_payload = data.get('device_name_provided', 
+                                     full_report.get("SystemIdentity", {}).get("Hostname", "UnknownDevice"))
+        
+        # التحقق من وجود جميع المكونات الضرورية
+        critical_components = {
+            "device_serial_raw": client_serial_raw, 
+            "machine_guid_raw": client_guid_raw, # أبقه إذا كان unique_hw_identifier يعتمد عليه
+            "timestamp_salt_used": client_timestamp_salt, 
+            "calculated_fingerprint_hash_step1": client_hash_step1,
+            "verification_hash_step2": client_hash_step2_verification,
+            "system_manufacturer_from_report": system_manufacturer_from_report,
+            "actual_system_model_from_report": actual_system_model_from_report # استخدم الاسم الجديد هنا
+        }
+        missing_fields = [k for k, v in critical_components.items() if not v or (isinstance(v, str) and v.startswith("N/A_"))]
+
+        if missing_fields:
+            error_message = f"Missing or invalid critical components for V3 registration. Check: {', '.join(missing_fields)}"
+            print(f"REGISTER_ERROR_V3: {error_message}")
+            return jsonify({"error": error_message}), 400
+
+        # --- الخطوة 1: التحقق من الهاش الأول ---
+        server_calculated_hash_step1 = calculate_hash_step1_on_server(
+            client_serial_raw,
+            client_timestamp_salt,
+            client_guid_raw # افترض أن هذه الدالة لا تزال تتوقع GUID
+        )
+
+        if server_calculated_hash_step1 is None: 
+             print("REGISTER_ERROR_V3: Server-side hash1 calculation failed (missing components for calc func).")
+             return jsonify({"error": "Server error during hash1 calculation."}), 500
+
+        if server_calculated_hash_step1 != client_hash_step1:
+            print(f"HASH1_MISMATCH_V3: ServerCalc={server_calculated_hash_step1}, ClientSent={client_hash_step1}")
+            return jsonify({"error": "Initial fingerprint (step 1) verification failed.", "status": "hash1_mismatch"}), 401
+        print("Initial fingerprint (step 1) VERIFIED successfully.")
+
+        # --- الخطوة 2: التحقق من الهاش الثاني ---
+        server_calculated_hash_step2 = calculate_hash_step2_on_server(
+            system_manufacturer_from_report,
+            SERVER_STATIC_SALT, 
+            actual_system_model_from_report, # استخدم actual_system_model_from_report هنا
+            client_hash_step1 
+        )
+
+        if server_calculated_hash_step2 is None: 
+            print("REGISTER_ERROR_V3: Server-side hash2 calculation failed (missing components for calc func).")
+            return jsonify({"error": "Server error during hash2 calculation."}), 500
+
+        if server_calculated_hash_step2 != client_hash_step2_verification:
+            print(f"HASH2_MISMATCH_V3: ServerCalc={server_calculated_hash_step2}, ClientSent={client_hash_step2_verification}")
+            print(f"  Debug HASH2 Inputs: Manuf='{system_manufacturer_from_report}', StaticSalt='{SERVER_STATIC_SALT}', Prod='{actual_system_model_from_report}', Hash1='{client_hash_step1}'")
+            return jsonify({"error": "Secondary verification hash (step 2) failed.", "status": "hash2_mismatch"}), 401
+        print("Secondary verification hash (step 2) VERIFIED successfully.")
+
+        # --- (اختياري) الخطوة 3: شغل "الخوارزمية المعينة" على full_report ---
+        print("Custom algorithm/policy check PASSED (or skipped for now).")
+
+        # --- الخطوة 4: تم التحقق من كل شيء، قم بالتسجيل وتوليد الترخيص ---
+        unique_hw_identifier_for_server_db = f"{client_serial_raw}_{client_guid_raw}" # افترض أنك لا تزال تستخدم GUID هنا للمعرف الفريد
+        
+        final_client_id_to_return = None
+        generated_license_key = None
+        device_already_existed = False
+        device_entry_updated = False # لتتبع ما إذا كنا بحاجة للحفظ
+
+        for s_id, dev_info in registered_devices.items():
+            if dev_info.get('unique_hw_id') == unique_hw_identifier_for_server_db:
+                final_client_id_to_return = s_id
+                generated_license_key = dev_info.get('license_key', f"EXISTING_LIC_{s_id}_{os.urandom(4).hex().upper()}")
+                
+                # تحديث المعلومات الحالية إذا تغيرت
+                if dev_info.get('device_name') != device_name_from_payload:
+                    dev_info['device_name'] = device_name_from_payload
+                    device_entry_updated = True
+                
+                # تحديث/إضافة system_model
+                if dev_info.get('system_model') != actual_system_model_from_report:
+                    dev_info['system_model'] = actual_system_model_from_report
+                    device_entry_updated = True
+                    print(f"  Updated system_model for existing device {s_id} to '{actual_system_model_from_report}'")
+                
+                # تحديث الطابع الزمني دائمًا عند إعادة التحقق
+                dev_info['last_full_registration_utc'] = current_time_utc.isoformat()
+                device_entry_updated = True 
+                
+                device_already_existed = True
+                message = "Device re-validated and license confirmed (V3)."
+                break
+        
+        if not device_already_existed:
+            final_client_id_to_return = str(uuid.uuid4())
+            generated_license_key = f"ESK_LIC_V3_{final_client_id_to_return[:8].upper()}_{os.urandom(6).hex().upper()}"
+            
+            is_this_device_premium = False 
+            registered_devices[final_client_id_to_return] = {
+                'raw_serial': client_serial_raw,
+                'raw_guid': client_guid_raw, # إذا كنت لا تزال تخزنه
+                'unique_hw_id': unique_hw_identifier_for_server_db,
+                'device_name': device_name_from_payload,
+                'license_key': generated_license_key,
+                'registration_utc': current_time_utc.isoformat(),
+                'last_heartbeat_utc': current_time_utc.isoformat(),
+                'last_routine_check_utc': current_time_utc.isoformat(),
+                'is_premium_user': is_this_device_premium,
+                'system_model': actual_system_model_from_report # تخزين موديل النظام عند الإنشاء الجديد
+            }
+            device_entry_updated = True 
+            message = "Device registered (V3) and license generated successfully!"
+        else: # إذا كان الجهاز موجودًا، تأكد من أن الحقول الإضافية مثل is_premium_user موجودة
+            if 'is_premium_user' not in registered_devices[final_client_id_to_return]:
+                registered_devices[final_client_id_to_return]['is_premium_user'] = False 
+                device_entry_updated = True
+            # تأكد أيضًا من وجود system_model إذا كان الجهاز قديمًا ولم يكن به هذا الحقل
+            if 'system_model' not in registered_devices[final_client_id_to_return]:
+                registered_devices[final_client_id_to_return]['system_model'] = actual_system_model_from_report
+                device_entry_updated = True
+                print(f"  Added missing system_model for existing device {final_client_id_to_return} to '{actual_system_model_from_report}'")
+
+
+        if device_entry_updated: 
+            save_devices()
+        
+        print(f"SUCCESS_V3: Device '{unique_hw_identifier_for_server_db}'. ClientID: {final_client_id_to_return}, License: {generated_license_key}")
+
+        return jsonify({
+            "status": "success",
+            "message": message,
+            "client_id": final_client_id_to_return,
+            "license_key": generated_license_key
+        }), 200
+
+    except Exception as e:
+        print(f"REGISTER_EXCEPTION_V3: {e}")
+        import traceback # تأكد من استيراد traceback إذا لم يكن مستوردًا بالفعل
         print(traceback.format_exc())
         return jsonify({"error": "Internal server error during V3 registration", "details": str(e)}), 500
 
@@ -392,6 +579,7 @@ class DeviceRoutineChecker:
     def __init__(self, registered_devices_dict):
         self.registered_devices = registered_devices_dict # هذا لا يزال مفيدًا للوصول إلى معلومات الجهاز إذا لزم الأمر
 
+
     def _get_device_info(self, client_id): # سيبقى مفيدًا
         return self.registered_devices.get(client_id)
 
@@ -410,6 +598,7 @@ class DeviceRoutineChecker:
         else:
             return {"success": False, "error": f"Check A failed. Expected '{expected_value}', got '{received_value}'.", "status_code": 400}
 
+
     def check_constant_value_B(self, client_id, client_data):
         """
         العميل يرسل قيمة، الخادم يتأكد أنها تطابق قيمة ثابتة B.
@@ -422,6 +611,7 @@ class DeviceRoutineChecker:
             return {"success": True, "message": f"Check B successful. Client sent '{received_value}'."}
         else:
             return {"success": False, "error": f"Check B failed. Expected '{expected_value}', got '{received_value}'.", "status_code": 400}
+
 
     def check_if_device_is_premium(self, client_id, client_data):
         """
@@ -437,7 +627,77 @@ class DeviceRoutineChecker:
             return {"success": True, "message": "Device is confirmed as premium."}
         else:
             return {"success": False, "error": "Device is not marked as premium.", "status_code": 403}
-    
+
+
+    def check_system_model_with_salt(self, client_id, client_data):
+        """
+        يستقبل SystemModel مُملح من العميل،
+        ويقارنه بـ SystemModel الخاص بالجهاز (من بيانات التسجيل) بعد تمليحه بملح الخادم.
+        client_data: يجب أن يحتوي على "salted_system_model_from_client".
+        """
+        print(f"SERVER: check_system_model_with_salt called for ClientID: {client_id} with data: {client_data}")
+        device_info = self._get_device_info(client_id)
+        if not device_info:
+            return {"success": False, "error": "Device not recognized.", "status_code": 401}
+
+        # نحتاج إلى SystemModel المخزن للجهاز.
+        # هذا يعتمد على كيفية تخزين full_system_report عند التسجيل.
+        # لنفترض أننا سنحصل عليه من 'full_system_report' المخزن (إذا كنت تخزنه)
+        # أو من حقل مخصص مثل 'stored_system_model'.
+        # حاليًا، كود التسجيل يرسل full_system_report ولكن لا يخزنه كله.
+        # سنحتاج لتعديل التسجيل ليخزن SystemModel أو نعتمد على أن الكلاينت سيرسله دائمًا.
+
+        # الطريقة الأبسط حاليًا هي افتراض أننا نحصل عليه من `full_system_report` الذي يرسله الكلاينت
+        # عند التسجيل، ويجب أن يكون قد تم تخزينه في `device_info`.
+        # إذا لم يكن مخزنًا، ستحتاج لتعديل منطق التسجيل.
+
+        # مثال إذا كان مخزنًا مباشرة في device_info (تحت مفتاح معين مثل 'system_model'):
+        # stored_system_model = device_info.get('system_model')
+
+        # للحصول عليه من `full_system_report` الذي *يجب* أن يكون الكلاينت قد أرسله عند التسجيل
+        # وكان يجب على الخادم تخزينه، أو جزء منه.
+        # نظرًا لأن `comprehensive_register_device_v3` يستخرج system_manufacturer_from_report
+        # و system_product_name_from_report من full_report، يمكننا افتراض أننا
+        # سنحتاج لتخزين SystemModel أيضًا عند التسجيل إذا أردنا استخدامه هنا.
+
+        # تعديل مؤقت: لنفترض أن `client_data` يمكن أن يحتوي على `system_model_from_client_raw` كحل بديل
+        # إذا لم يكن مخزنًا، ولكن هذا ليس مثاليًا للأمان.
+        # الأفضل هو تخزينه عند التسجيل.
+
+        # === الحل الأفضل: افترض أن SystemModel مخزن عند التسجيل ===
+        # عدّل دالة comprehensive_register_device_v3 لتخزن 'system_model'
+        # registered_devices[final_client_id_to_return]['system_model'] = system_product_name_from_report 
+        # (أو system_model_from_report إذا كان لديك هذا المفتاح)
+
+        # الآن، افترض أنه مخزن:
+        stored_system_model = device_info.get('system_model') # أو 'product_name' أو المفتاح الصحيح
+        if not stored_system_model:
+            # إذا لم يكن `system_model` مخزنًا، جرب الحصول عليه من `client_data` (كحل مؤقت إذا كان الكلاينت يرسله)
+            # هذا يتطلب أن يرسل الكلاينت `system_model` خام أيضًا في `check_payload`
+            # وهو ليس ما فعلناه في الكلاينت. لذا، هذا سيفشل حاليًا.
+            # **يجب تعديل التسجيل ليخزن SystemModel**
+            print(f"SERVER_ERROR: 'system_model' not found in stored device_info for ClientID {client_id}.")
+            return {"success": False, "error": "Server configuration error: SystemModel not stored for this device.", "status_code": 500}
+
+        salted_system_model_from_client = client_data.get("salted_system_model_from_client")
+        if not salted_system_model_from_client:
+            return {"success": False, "error": "Missing 'salted_system_model_from_client' in payload.", "status_code": 400}
+
+        # التأكد من أن SERVER_STATIC_SALT مُعرف
+        if not SERVER_STATIC_SALT: # SERVER_STATIC_SALT يجب أن يكون مُعرفًا في أعلى الملف
+             print("SERVER_ERROR: SERVER_STATIC_SALT is not defined on the server!")
+             return {"success": False, "error": "Server-side static salt not configured.", "status_code": 500}
+
+        server_calculated_salted_model = f"{stored_system_model}{SERVER_STATIC_SALT}"
+        print(f"  Server calculated: '{server_calculated_salted_model}' (StoredModel: '{stored_system_model}', Salt: '{SERVER_STATIC_SALT}')")
+        print(f"  Client sent: '{salted_system_model_from_client}'")
+
+
+        if server_calculated_salted_model == salted_system_model_from_client:
+            return {"success": True, "message": "System Model with Salt check successful."}
+        else:
+            return {"success": False, "error": "System Model with Salt check failed (mismatch).", "status_code": 403}  
+
     # يمكنك إضافة المزيد من دوال التحقق هنا لاحقًا.
 
 # إنشاء نسخة من الكلاس

@@ -6,10 +6,11 @@
         "device_name": "PREDATOR",
         "license_key": "ESK_LIC_V3_77E78B7B_F24FBB230DD2",
         "registration_utc": "2025-06-16T15:51:44.615186+00:00",
-        "last_heartbeat_utc": "2025-06-16T19:44:48.718123+00:00",
-        "last_routine_check_utc": "2025-06-16T19:44:48.718123+00:00",
-        "last_full_registration_utc": "2025-06-16T18:54:46.050677+00:00",
-        "last_generic_check_utc": "2025-06-16T17:51:22.496141+00:00",
-        "is_premium_user": false
+        "last_heartbeat_utc": "2025-06-16T20:19:56.063916+00:00",
+        "last_routine_check_utc": "2025-06-16T20:19:56.063916+00:00",
+        "last_full_registration_utc": "2025-06-16T20:19:53.911634+00:00",
+        "last_generic_check_utc": "2025-06-16T20:20:03.847403+00:00",
+        "is_premium_user": false,
+        "system_model": "Predator PH16-71"
     }
 }
