@@ -1,0 +1,131 @@
+from flask import Flask, request, g, jsonify, abort
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, scoped_session
+import hashlib
+import threading
+import json
+import os
+
+app = Flask(__name__)
+
+# --- إعداد الـ tenants وقواعد البيانات الخاصة ---
+# ملف أو إعداد خارجي يمكن تحديثه بسهولة
+TENANTS_CONFIG = {
+    "company1": "sqlite:///db/company1.sqlite",
+    "company2": "sqlite:///db/company2.sqlite",
+    "company3": "sqlite:///db/company3.sqlite"
+}
+
+# تحميل الأجهزة المسجلة لكل شركة من ملفات منفصلة
+def load_registered_devices(company_code):
+    filename = f"devices_{company_code}.json"
+    if os.path.exists(filename):
+        with open(filename, "r") as f:
+            return json.load(f)
+    return {}
+
+# حفظ الأجهزة المسجلة (يمكن تنفيذها عند تحديث الأجهزة)
+def save_registered_devices(company_code, devices_dict):
+    filename = f"devices_{company_code}.json"
+    with open(filename, "w") as f:
+        json.dump(devices_dict, f, indent=4)
+
+# --- إنشاء محرك قاعدة بيانات وجلسة لكل شركة ---
+ENGINES = {}
+SESSIONS = {}
+
+for tenant, db_uri in TENANTS_CONFIG.items():
+    engine = create_engine(db_uri, connect_args={"check_same_thread": False})
+    ENGINES[tenant] = engine
+    # scoped_session يضمن جلسة منفصلة لكل Thread/Request
+    session_factory = sessionmaker(bind=engine)
+    SESSIONS[tenant] = scoped_session(session_factory)
+
+# --- استخراج tenant (company) من Subdomain ---
+def get_tenant_from_request():
+    host = request.host  # مثل company1.example.com:5000
+    # إزالة رقم البورت إذا موجود
+    host = host.split(':')[0]
+    # افترض دومينك الرئيسي example.com
+    main_domain = "example.com"
+    if not host.endswith(main_domain):
+        return None
+    parts = host.split('.')
+    # company1.example.com -> ['company1', 'example', 'com']
+    if len(parts) < 3:
+        return None
+    tenant = parts[0]
+    if tenant in TENANTS_CONFIG:
+        return tenant
+    return None
+
+# --- التحقق من صحة الجهاز ---
+def verify_device(tenant, device_serial, utc_timestamp_salt, machine_guid, client_hash):
+    # هذه هي دالة التحقق من الهاش على السيرفر
+    # بناء الهاش يجب أن يتطابق مع الكلاينت
+    string_to_hash = f"{device_serial}{utc_timestamp_salt}{machine_guid}"
+    server_hash = hashlib.sha256(string_to_hash.encode('utf-8')).hexdigest()
+
+    if server_hash != client_hash:
+        return False
+
+    # تحقق أن الجهاز مسجل للشركة
+    devices = load_registered_devices(tenant)
+    if device_serial not in devices:
+        return False
+
+    # تحقق من صلاحية الجهاز (مثلاً يمكن أن نتحقق من machine_guid)
+    if devices[device_serial]["machine_guid"] != machine_guid:
+        return False
+
+    # إضافة تحقق وقت الطلب (مثلاً التحقق من أن utc_timestamp_salt حديث لضمان عدم إعادة استخدام الطلب)
+    # هنا تركها بسيطة يمكنك إضافة تحقق إضافي
+    return True
+
+# --- Middleware / قبل معالجة الطلب ---
+@app.before_request
+def before_request():
+    tenant = get_tenant_from_request()
+    if tenant is None:
+        abort(404, description="Tenant (company) not found or invalid subdomain")
+
+    g.tenant = tenant
+    g.db_session = SESSIONS[tenant]
+
+    # التحقق من طلب API الحساس (مثلاً كل طلب API يستدعي verify_device)
+    # فرضاً أن البيانات تأتي من Headers أو JSON
+    if request.path.startswith("/api/"):
+        device_serial = request.headers.get("X-Device-Serial")
+        utc_timestamp_salt = request.headers.get("X-UTC-Timestamp")
+        machine_guid = request.headers.get("X-Machine-GUID")
+        client_hash = request.headers.get("X-Client-Hash")
+
+        if not all([device_serial, utc_timestamp_salt, machine_guid, client_hash]):
+            abort(401, description="Missing authentication headers")
+
+        if not verify_device(tenant, device_serial, utc_timestamp_salt, machine_guid, client_hash):
+            abort(403, description="Unauthorized device or invalid hash")
+
+# --- بعد الطلب (تنظيف الجلسة) ---
+@app.teardown_request
+def teardown_request(exception=None):
+    session = getattr(g, "db_session", None)
+    if session is not None:
+        session.remove()
+
+# --- مثال endpoint API يعزل بيانات الشركة ---
+@app.route("/api/v1/data", methods=["GET"])
+def get_data():
+    session = g.db_session
+
+    # افترض وجود جدول بيانات مشترك (يجب تهيئة ORM أو الجداول مسبقًا)
+    # على سبيل المثال: جلب كل السجلات من جدول بيانات معين خاص بالشركة
+    result = session.execute("SELECT * FROM company_data_table").fetchall()
+
+    # تحويل النتيجة إلى JSON
+    data = [dict(row) for row in result]
+    return jsonify({"tenant": g.tenant, "data": data})
+
+# --- نقطة بداية التطبيق ---
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
